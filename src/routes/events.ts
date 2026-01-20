@@ -3,13 +3,21 @@ import { db } from '../db';
 import { v4 as uuid } from 'uuid';
 
 type EventPayload = {
-  event: 'first_run' | 'login';
+  event:
+    | 'first_run'
+    | 'login'
+    | 'generate'
+    | 'angular'
+    | 'help'
+    | 'command_run'
+    | string;
   installationId: string;
   deviceId?: string;
   os?: string;
   arch?: string;
   email?: string;
   cliVersion?: string;
+  deviceCreatedAt?: string;
 };
 
 export async function eventsRoutes(app: FastifyInstance) {
@@ -17,30 +25,31 @@ export async function eventsRoutes(app: FastifyInstance) {
     const body = req.body;
     const ip = req.ip;
 
-    if (body.event === 'first_run') {
+    if (body.event && body.installationId && body.deviceId) {
+      const deviceCreatedAt = body.deviceCreatedAt
+        ? new Date(body.deviceCreatedAt)
+        : null;
       await db.query(
         `
-        INSERT INTO installations (
-          id, device_id, os, arch, ip,
-          first_seen_at, last_seen_at
+        INSERT INTO telemetry_events (
+          id, event, installation_id, device_id, user_id, email,
+          cli_version, device_created_at, ip, country, city, created_at
         )
-        VALUES ($1,$2,$3,$4,$5,NOW(),NOW())
-        ON CONFLICT (id)
-        DO UPDATE SET last_seen_at = NOW()
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
         `,
-        [body.installationId, body.deviceId, body.os, body.arch, ip]
-      );
-    }
-
-    if (body.event === 'login') {
-      await db.query(
-        `
-        INSERT INTO logins (
-          id, installation_id, email, cli_version, created_at
-        )
-        VALUES ($1,$2,$3,$4,NOW())
-        `,
-        [uuid(), body.installationId, body.email, body.cliVersion]
+        [
+          uuid(),
+          body.event,
+          body.installationId,
+          body.deviceId,
+          null,
+          body.email ?? null,
+          body.cliVersion ?? null,
+          deviceCreatedAt,
+          ip,
+          null,
+          null
+        ]
       );
     }
 
