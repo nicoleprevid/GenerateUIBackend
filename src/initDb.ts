@@ -13,11 +13,12 @@ export async function initDb() {
       CREATE TABLE IF NOT EXISTS telemetry_events (
         id UUID PRIMARY KEY,
         event TEXT NOT NULL,
-        installation_id TEXT NOT NULL,
-        device_id TEXT NOT NULL,
+        installation_id TEXT,
+        device_id TEXT,
         user_id TEXT,
         email TEXT,
         cli_version TEXT,
+        npm_user_agent TEXT,
         device_created_at TIMESTAMP,
         ip TEXT,
         country TEXT,
@@ -25,6 +26,15 @@ export async function initDb() {
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )
     `);
+    await client.query(
+      'ALTER TABLE IF EXISTS telemetry_events ALTER COLUMN installation_id DROP NOT NULL'
+    );
+    await client.query(
+      'ALTER TABLE IF EXISTS telemetry_events ALTER COLUMN device_id DROP NOT NULL'
+    );
+    await client.query(
+      'ALTER TABLE IF EXISTS telemetry_events ADD COLUMN IF NOT EXISTS npm_user_agent TEXT'
+    );
     await client.query(`
       CREATE INDEX IF NOT EXISTS telemetry_events_event_idx
       ON telemetry_events(event)
