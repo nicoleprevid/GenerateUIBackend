@@ -4,6 +4,9 @@ export async function initDb() {
   const client = await db.connect();
   try {
     await client.query('SELECT 1');
+    await client.query(
+      'ALTER TABLE IF EXISTS generations DROP CONSTRAINT IF EXISTS generations_installation_id_fkey'
+    );
     await client.query('DROP TABLE IF EXISTS logins');
     await client.query('DROP TABLE IF EXISTS installations');
     await client.query(`
