@@ -4,6 +4,7 @@ import 'dotenv/config';
 import { eventsRoutes } from './routes/events';
 import { authRoutes } from './routes/auth';
 import { telemetryRoutes } from './routes/telemetry';
+import { meRoutes } from './routes/me';
 import { initDb } from './initDb';
 
 const app = Fastify({ logger: true, trustProxy: true });
@@ -12,6 +13,7 @@ app.register(cors);
 app.register(eventsRoutes);
 app.register(authRoutes);
 app.register(telemetryRoutes);
+app.register(meRoutes);
 
 const PORT = Number(process.env.PORT) || 3000;
 
