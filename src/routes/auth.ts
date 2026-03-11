@@ -1,19 +1,40 @@
 import { FastifyInstance } from 'fastify';
-import crypto from 'crypto';
 import { URL } from 'url';
 import * as oauth from 'oauth4webapi';
+import { v4 as uuid } from 'uuid';
+import { db } from '../db';
+import { signState, signToken, verifyState } from '../lib/jwt';
+import { createCheckoutSessionForUser } from '../billing/stripeCheckout';
 
 const PORT = Number(process.env.PORT) || 3000;
 const BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`;
-const JWT_SECRET =
-  process.env.GENERATEUI_JWT_SECRET || 'dev-secret-change-in-production';
-
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 
+const LOGIN_AUTO_CHECKOUT = process.env.LOGIN_AUTO_CHECKOUT === 'true';
+const LOGIN_STRIPE_PRICE_ID = process.env.LOGIN_STRIPE_PRICE_ID || '';
+const LOGIN_STRIPE_SUCCESS_URL = process.env.LOGIN_STRIPE_SUCCESS_URL || '';
+const LOGIN_STRIPE_CANCEL_URL = process.env.LOGIN_STRIPE_CANCEL_URL || '';
+
 type Provider = 'github' | 'google';
+
+type AuthRedirectOptions = {
+  redirectUri?: string;
+  startCheckout: boolean;
+  priceId?: string;
+  successUrl?: string;
+  cancelUrl?: string;
+};
+
+type LoginPayload = {
+  redirectUri?: string;
+  startCheckout?: boolean;
+  priceId?: string;
+  successUrl?: string;
+  cancelUrl?: string;
+};
 
 const LOGIN_HTML = `<!doctype html>
 <html lang="en">
@@ -23,84 +44,147 @@ const LOGIN_HTML = `<!doctype html>
     <title>GenerateUI Login</title>
     <style>
       :root {
-        --bg: #f3e8ff;
+        --bg-1: #f9f5ea;
+        --bg-2: #eef7f4;
         --card: #ffffff;
-        --text: #2a1b3d;
-        --muted: #6b5b7a;
-        --primary: #7c3aed;
-        --secondary: #a855f7;
-        --glow: rgba(124, 58, 237, 0.22);
+        --text: #39455f;
+        --muted: #76819a;
+        --accent: #6fd3c0;
+        --accent-2: #9fd8ff;
+        --border: #e1e7f2;
+        --shadow: rgba(76, 88, 120, 0.14);
       }
       * {
         box-sizing: border-box;
-        font-family: "IBM Plex Serif", "Georgia", serif;
+        font-family: "Manrope", "Segoe UI", sans-serif;
       }
       body {
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background: radial-gradient(circle at top, #f5ebff, #e9d5ff);
+        background:
+          radial-gradient(circle at 15% 0%, #fff3c8 0%, var(--bg-1) 36%, transparent 60%),
+          radial-gradient(circle at 85% 0%, #e6f7ff 0%, var(--bg-2) 40%, transparent 70%),
+          linear-gradient(135deg, #fdfbf6, #f3f7fb);
         color: var(--text);
       }
       main {
-        background: var(--card);
-        padding: 48px;
-        border-radius: 24px;
-        box-shadow: 0 24px 70px var(--glow);
-        width: min(420px, 90vw);
-        text-align: center;
+        background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(255,255,255,0.98));
+        padding: 44px;
+        border-radius: 28px;
+        border: 1px solid var(--border);
+        box-shadow: 0 24px 60px var(--shadow);
+        width: min(520px, 92vw);
+        text-align: left;
+        position: relative;
+        overflow: hidden;
+      }
+      main::before {
+        content: "";
+        position: absolute;
+        inset: -40% 25% auto auto;
+        width: 280px;
+        height: 280px;
+        background: radial-gradient(circle, rgba(111,211,192,0.35), transparent 70%);
+        pointer-events: none;
+      }
+      .label {
+        letter-spacing: 0.22em;
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
       }
       h1 {
-        margin: 0 0 12px;
-        font-size: 28px;
+        margin: 10px 0 12px;
+        font-size: 30px;
+        letter-spacing: 0.02em;
       }
       p {
-        margin: 0 0 32px;
+        margin: 0 0 28px;
         color: var(--muted);
+        line-height: 1.5;
+      }
+      .buttons {
+        display: grid;
+        gap: 12px;
       }
       a.button {
-        display: block;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         text-decoration: none;
         padding: 14px 18px;
         border-radius: 14px;
-        margin-bottom: 12px;
         font-weight: 600;
-        border: 1px solid transparent;
+        border: 1px solid var(--border);
+        color: var(--text);
+        background: #f9fbff;
+        transition: transform 0.15s ease, box-shadow 0.2s ease;
       }
       a.button.primary {
-        background: var(--primary);
-        color: white;
+        background: linear-gradient(120deg, var(--accent), var(--accent-2));
+        border-color: transparent;
+        color: #ffffff;
       }
-      a.button.secondary {
-        background: #f5e9ff;
-        color: #5b21b6;
-        border-color: #e9d5ff;
+      a.button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 24px rgba(33, 61, 94, 0.12);
       }
       .footer {
-        margin-top: 24px;
-        font-size: 14px;
+        margin-top: 22px;
+        font-size: 13px;
         color: var(--muted);
+      }
+      .pill {
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.65);
+        border: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--muted);
+      }
+      @media (max-width: 520px) {
+        main {
+          padding: 32px 24px;
+          text-align: center;
+        }
+        a.button {
+          justify-content: center;
+          gap: 10px;
+        }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>GenerateUI Login</h1>
-      <p>Continue with your preferred provider.</p>
-      <a class="button primary" id="github" href="#">Continue with GitHub</a>
-      <a class="button secondary" id="google" href="#">Continue with Google</a>
-      <div class="footer">After login you can close this window.</div>
+      <div class="label">Generated UI</div>
+      <h1>Sign in to continue</h1>
+      <p>Access dev features and manage your subscription.</p>
+      <div class="buttons">
+        <a class="button primary" id="github" href="#">
+          Continue with GitHub
+          <span class="pill">Recommended</span>
+        </a>
+        <a class="button" id="google" href="#">
+          Continue with Google
+          <span class="pill">Fast</span>
+        </a>
+      </div>
     </main>
     <script>
       const params = new URLSearchParams(window.location.search);
       const redirectUri = params.get('redirect_uri') || '';
-      const apiBase = params.get('api_base') || '';
+      const apiBase = params.get('api_base') || window.location.origin;
+      const startCheckout = params.get('start_checkout') === '1';
+      const priceId = params.get('price_id') || '';
+      const successUrl = params.get('success_url') || '';
+      const cancelUrl = params.get('cancel_url') || '';
 
       const github = document.getElementById('github');
       const google = document.getElementById('google');
 
-      if (redirectUri && apiBase) {
+      if (redirectUri) {
         github.href =
           apiBase +
           '/auth/github?redirect_uri=' +
@@ -109,77 +193,44 @@ const LOGIN_HTML = `<!doctype html>
           apiBase +
           '/auth/google?redirect_uri=' +
           encodeURIComponent(redirectUri);
+      } else if (startCheckout) {
+        const common =
+          '?start_checkout=1' +
+          (priceId ? '&price_id=' + encodeURIComponent(priceId) : '') +
+          (successUrl ? '&success_url=' + encodeURIComponent(successUrl) : '') +
+          (cancelUrl ? '&cancel_url=' + encodeURIComponent(cancelUrl) : '');
+
+        github.href = apiBase + '/auth/github' + common;
+        google.href = apiBase + '/auth/google' + common;
       } else {
-        github.href = '#';
-        google.href = '#';
+        github.href = apiBase + '/auth/github';
+        google.href = apiBase + '/auth/google';
       }
     </script>
   </body>
 </html>
 `;
 
-function base64Url(input: Buffer | string) {
-  const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
-  return buffer
-    .toString('base64')
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_');
-}
-
-function signHmac(input: string) {
-  return base64Url(
-    crypto.createHmac('sha256', JWT_SECRET).update(input).digest()
-  );
-}
-
-function signToken(
-  payload: Record<string, unknown>,
-  expiresInSec = 30 * 24 * 60 * 60
-) {
-  const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const now = Math.floor(Date.now() / 1000);
-  const fullPayload = {
-    ...payload,
-    iat: now,
-    exp: now + expiresInSec
+function getDefaultCheckoutConfig() {
+  return {
+    priceId: LOGIN_STRIPE_PRICE_ID,
+    successUrl: LOGIN_STRIPE_SUCCESS_URL,
+    cancelUrl: LOGIN_STRIPE_CANCEL_URL
   };
-  const body = base64Url(JSON.stringify(fullPayload));
-  const signature = signHmac(`${header}.${body}`);
-  return `${header}.${body}.${signature}`;
 }
 
-function signState(payload: Record<string, unknown>) {
-  const body = base64Url(JSON.stringify(payload));
-  const signature = signHmac(body);
-  return `${body}.${signature}`;
-}
-
-function verifyState(state: string) {
-  const parts = state.split('.');
-  if (parts.length !== 2) return null;
-  const [body, signature] = parts;
-  const expected = signHmac(body);
-  if (expected !== signature) return null;
-  try {
-    return JSON.parse(
-      Buffer.from(body.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString(
-        'utf-8'
-      )
-    );
-  } catch {
-    return null;
-  }
-}
-
-async function getAuthRedirect(provider: Provider, redirectUri: string) {
+async function getAuthRedirect(provider: Provider, options: AuthRedirectOptions) {
   const codeVerifier = oauth.generateRandomCodeVerifier();
   const codeChallenge = await oauth.calculatePKCECodeChallenge(codeVerifier);
   const nonce = provider === 'google' ? oauth.generateRandomNonce() : undefined;
 
   const state = signState({
     provider,
-    redirectUri,
+    redirectUri: options.redirectUri,
+    startCheckout: options.startCheckout,
+    priceId: options.priceId,
+    successUrl: options.successUrl,
+    cancelUrl: options.cancelUrl,
     codeVerifier,
     nonce,
     state: oauth.generateRandomState()
@@ -310,43 +361,195 @@ async function exchangeGoogleCode(
   };
 }
 
+async function findOrCreateUser(provider: Provider, providerUserId: string) {
+  const existing = await db.query<{ user_id: string }>(
+    `
+    SELECT user_id
+    FROM auth_identities
+    WHERE provider = $1 AND provider_user_id = $2
+    LIMIT 1
+    `,
+    [provider, providerUserId]
+  );
+
+  if (existing.rows[0]?.user_id) {
+    return existing.rows[0].user_id;
+  }
+
+  const userId = uuid();
+  await db.query(
+    `
+    INSERT INTO users (id, created_at, updated_at)
+    VALUES ($1, NOW(), NOW())
+    ON CONFLICT DO NOTHING
+    `,
+    [userId]
+  );
+
+  await db.query(
+    `
+    INSERT INTO auth_identities (provider, provider_user_id, user_id, created_at)
+    VALUES ($1, $2, $3, NOW())
+    ON CONFLICT (provider, provider_user_id) DO NOTHING
+    `,
+    [provider, providerUserId, userId]
+  );
+
+  const resolved = await db.query<{ user_id: string }>(
+    `
+    SELECT user_id
+    FROM auth_identities
+    WHERE provider = $1 AND provider_user_id = $2
+    LIMIT 1
+    `,
+    [provider, providerUserId]
+  );
+
+  if (!resolved.rows[0]?.user_id) {
+    throw new Error('failed to resolve authenticated user');
+  }
+
+  return resolved.rows[0].user_id;
+}
+
+async function hasActiveEntitlement(userId: string) {
+  const result = await db.query<{ subscription_status: string }>(
+    `
+    SELECT subscription_status
+    FROM entitlements
+    WHERE user_id = $1
+    LIMIT 1
+    `,
+    [userId]
+  );
+  const status = result.rows[0]?.subscription_status;
+  return status === 'active' || status === 'trialing';
+}
+
+function redirectWithToken(reply: { redirect: (url: string) => unknown }, redirectUri: string, userId: string) {
+  const token = signToken({ sub: userId });
+  const expiresAt = new Date(
+    Date.now() + 30 * 24 * 60 * 60 * 1000
+  ).toISOString();
+  const redirectUrl = new URL(redirectUri);
+  redirectUrl.searchParams.set('access_token', token);
+  redirectUrl.searchParams.set('expires_at', expiresAt);
+  return reply.redirect(redirectUrl.toString());
+}
+
+async function completeLogin(
+  provider: Provider,
+  providerUserId: string,
+  payload: LoginPayload,
+  reply: { redirect: (url: string) => unknown }
+) {
+  const userId = await findOrCreateUser(provider, providerUserId);
+
+  if (payload.startCheckout) {
+    const alreadyEntitled = await hasActiveEntitlement(userId);
+    const defaults = getDefaultCheckoutConfig();
+    const priceId = payload.priceId || defaults.priceId;
+    const successUrl = payload.successUrl || defaults.successUrl;
+    const cancelUrl = payload.cancelUrl || defaults.cancelUrl;
+
+    if (alreadyEntitled) {
+      if (successUrl) {
+        const redirectUrl = new URL(successUrl);
+        redirectUrl.searchParams.set('already_subscribed', '1');
+        return reply.redirect(redirectUrl.toString());
+      }
+      if (payload.redirectUri) {
+        return redirectWithToken(reply, payload.redirectUri, userId);
+      }
+      throw new Error('already subscribed and missing success redirect');
+    }
+
+    if (!priceId || !successUrl || !cancelUrl) {
+      throw new Error('missing checkout configuration');
+    }
+
+    const session = await createCheckoutSessionForUser({
+      userId,
+      priceId,
+      successUrl,
+      cancelUrl
+    });
+
+    return reply.redirect(session.checkoutUrl);
+  }
+
+  if (!payload.redirectUri) {
+    throw new Error('redirect_uri required');
+  }
+
+  return redirectWithToken(reply, payload.redirectUri, userId);
+}
+
 export async function authRoutes(app: FastifyInstance) {
   app.get('/', async (_req, reply) => {
     reply.type('text/html; charset=utf-8').send(LOGIN_HTML);
   });
 
   app.get('/auth/github', async (req, reply) => {
-    const redirectUri = (req.query as { redirect_uri?: string }).redirect_uri || '';
-    if (!redirectUri) {
+    const query = req.query as {
+      redirect_uri?: string;
+      start_checkout?: string;
+      price_id?: string;
+      success_url?: string;
+      cancel_url?: string;
+    };
+
+    const startCheckout = query.start_checkout === '1' || LOGIN_AUTO_CHECKOUT;
+    if (!query.redirect_uri && !startCheckout) {
       return reply.status(400).send({ error: 'redirect_uri required' });
     }
     if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
       return reply.status(500).send({ error: 'GitHub OAuth not configured' });
     }
-    const location = await getAuthRedirect('github', redirectUri);
+
+    const location = await getAuthRedirect('github', {
+      redirectUri: query.redirect_uri,
+      startCheckout,
+      priceId: query.price_id,
+      successUrl: query.success_url,
+      cancelUrl: query.cancel_url
+    });
     return reply.redirect(location);
   });
 
   app.get('/auth/google', async (req, reply) => {
-    const redirectUri = (req.query as { redirect_uri?: string }).redirect_uri || '';
-    if (!redirectUri) {
+    const query = req.query as {
+      redirect_uri?: string;
+      start_checkout?: string;
+      price_id?: string;
+      success_url?: string;
+      cancel_url?: string;
+    };
+
+    const startCheckout = query.start_checkout === '1' || LOGIN_AUTO_CHECKOUT;
+    if (!query.redirect_uri && !startCheckout) {
       return reply.status(400).send({ error: 'redirect_uri required' });
     }
     if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
       return reply.status(500).send({ error: 'Google OAuth not configured' });
     }
-    const location = await getAuthRedirect('google', redirectUri);
+
+    const location = await getAuthRedirect('google', {
+      redirectUri: query.redirect_uri,
+      startCheckout,
+      priceId: query.price_id,
+      successUrl: query.success_url,
+      cancelUrl: query.cancel_url
+    });
     return reply.redirect(location);
   });
 
   app.get('/auth/github/callback', async (req, reply) => {
     const requestUrl = new URL(req.url, BASE_URL);
     const state = requestUrl.searchParams.get('state') || '';
-    const payload = verifyState(state) as
-      | { redirectUri?: string; codeVerifier?: string }
-      | null;
+    const payload = verifyState(state) as (LoginPayload & { codeVerifier?: string }) | null;
 
-    if (!payload?.redirectUri || !payload.codeVerifier) {
+    if (!payload?.codeVerifier) {
       return reply.status(400).send({ error: 'Invalid callback' });
     }
 
@@ -368,14 +571,9 @@ export async function authRoutes(app: FastifyInstance) {
         payload.codeVerifier,
         `${BASE_URL}/auth/github/callback`
       );
-      const token = signToken({ sub: providerUserId, plan: 'dev' });
-      const expiresAt = new Date(
-        Date.now() + 30 * 24 * 60 * 60 * 1000
-      ).toISOString();
-      const redirectUrl = new URL(payload.redirectUri);
-      redirectUrl.searchParams.set('access_token', token);
-      redirectUrl.searchParams.set('expires_at', expiresAt);
-      return reply.redirect(redirectUrl.toString());
+
+      await completeLogin('github', providerUserId, payload, reply);
+      return;
     } catch {
       return reply.status(500).send({ error: 'OAuth failed' });
     }
@@ -384,11 +582,12 @@ export async function authRoutes(app: FastifyInstance) {
   app.get('/auth/google/callback', async (req, reply) => {
     const requestUrl = new URL(req.url, BASE_URL);
     const state = requestUrl.searchParams.get('state') || '';
-    const payload = verifyState(state) as
-      | { redirectUri?: string; codeVerifier?: string; nonce?: string }
-      | null;
+    const payload = verifyState(state) as (LoginPayload & {
+      codeVerifier?: string;
+      nonce?: string;
+    }) | null;
 
-    if (!payload?.redirectUri || !payload.codeVerifier) {
+    if (!payload?.codeVerifier) {
       return reply.status(400).send({ error: 'Invalid callback' });
     }
 
@@ -411,14 +610,9 @@ export async function authRoutes(app: FastifyInstance) {
         `${BASE_URL}/auth/google/callback`,
         payload.nonce
       );
-      const token = signToken({ sub: providerUserId, plan: 'dev' });
-      const expiresAt = new Date(
-        Date.now() + 30 * 24 * 60 * 60 * 1000
-      ).toISOString();
-      const redirectUrl = new URL(payload.redirectUri);
-      redirectUrl.searchParams.set('access_token', token);
-      redirectUrl.searchParams.set('expires_at', expiresAt);
-      return reply.redirect(redirectUrl.toString());
+
+      await completeLogin('google', providerUserId, payload, reply);
+      return;
     } catch {
       return reply.status(500).send({ error: 'OAuth failed' });
     }

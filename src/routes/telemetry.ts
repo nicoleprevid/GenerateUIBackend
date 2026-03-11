@@ -1,10 +1,8 @@
 import { FastifyInstance, FastifyRequest } from 'fastify';
-import crypto from 'crypto';
 import { db } from '../db';
 import { v4 as uuid } from 'uuid';
-
-const JWT_SECRET =
-  process.env.GENERATEUI_JWT_SECRET || 'dev-secret-change-in-production';
+import { getBearerToken } from '../lib/auth';
+import { verifyToken } from '../lib/jwt';
 
 type TelemetryPayload = {
   event: string;
@@ -19,42 +17,6 @@ type GeoResult = {
   country: string | null;
   city: string | null;
 };
-
-function base64Url(input: Buffer | string) {
-  const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
-  return buffer
-    .toString('base64')
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_');
-}
-
-function signHmac(input: string) {
-  return base64Url(
-    crypto.createHmac('sha256', JWT_SECRET).update(input).digest()
-  );
-}
-
-function verifyToken(token: string) {
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  const [header, body, signature] = parts;
-  const expected = signHmac(`${header}.${body}`);
-  if (expected !== signature) return null;
-
-  try {
-    const payload = JSON.parse(
-      Buffer.from(body.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString(
-        'utf-8'
-      )
-    );
-    const exp = payload.exp;
-    if (typeof exp !== 'number' || exp * 1000 <= Date.now()) return null;
-    return payload as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
 
 function isPrivateIp(ip: string) {
   if (!ip) return true;
@@ -111,10 +73,7 @@ export async function telemetryRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'invalid payload' });
       }
 
-      const auth = req.headers.authorization || '';
-      const token = auth.startsWith('Bearer ')
-        ? auth.slice('Bearer '.length)
-        : '';
+      const token = getBearerToken(req);
       let userId: string | null = null;
       let email: string | null = body.email ?? null;
       if (token) {
