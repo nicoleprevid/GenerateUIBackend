@@ -2,9 +2,10 @@ import { FastifyInstance, FastifyRequest } from 'fastify';
 import crypto from 'crypto';
 import { v4 as uuid } from 'uuid';
 import { db } from '../db';
-import { getAuthenticatedUserId } from '../lib/auth';
+import { getAuthenticatedUserId, getAuthCookieName } from '../lib/auth';
 import { entitlementsFromSubscriptionStatus } from '../billing/entitlements';
 import { createCheckoutSessionForUser } from '../billing/stripeCheckout';
+import { signToken } from '../lib/jwt';
 
 type CheckoutRequest = {
   priceId: string;
@@ -505,26 +506,11 @@ export async function billingRoutes(app: FastifyInstance) {
     </main>
 
     <script>
-      function getToken() {
-        const params = new URLSearchParams(window.location.search);
-        const fromQuery = params.get('access_token');
-        if (fromQuery) return fromQuery;
-        const fromStorage =
-          localStorage.getItem('generateui_access_token') ||
-          localStorage.getItem('access_token');
-        return fromStorage || '';
-      }
-
       async function callApi(path, options = {}) {
-        const token = getToken();
-        if (!token) {
-          throw new Error('Faça login primeiro para gerenciar assinatura.');
-        }
         const response = await fetch(path, {
           ...options,
           headers: {
             'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + token,
             ...(options.headers || {})
           }
         });
@@ -662,6 +648,68 @@ export async function billingRoutes(app: FastifyInstance) {
       }
 
       return reply.send({ url: responseBody.url });
+    }
+  );
+
+  app.get(
+    '/billing/checkout/finish',
+    async (req: FastifyRequest, reply) => {
+      const sessionId = (req.query as { session_id?: string }).session_id || '';
+      const returnUrl = (req.query as { return_url?: string }).return_url || '';
+      if (!sessionId || !returnUrl) {
+        return reply.status(400).send({ error: 'session_id and return_url are required' });
+      }
+      if (!STRIPE_SECRET_KEY) {
+        return reply.status(500).send({ error: 'stripe not configured' });
+      }
+
+      const stripeResponse = await fetch(
+        `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${STRIPE_SECRET_KEY}`
+          }
+        }
+      );
+      const responseBody = (await stripeResponse.json()) as {
+        metadata?: Record<string, string>;
+        client_reference_id?: string;
+        customer?: string;
+        error?: { message?: string };
+      };
+      if (!stripeResponse.ok) {
+        return reply.status(400).send({
+          error: responseBody.error?.message || 'failed to fetch checkout session'
+        });
+      }
+
+      const userId =
+        responseBody?.metadata?.user_id || responseBody.client_reference_id || '';
+      if (!userId) {
+        return reply.status(400).send({ error: 'user_id not found in session' });
+      }
+
+      const token = signToken({ sub: userId });
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      const isSecure = (process.env.API_BASE_URL || '').startsWith('https://');
+      const cookie = [
+        `${getAuthCookieName()}=${encodeURIComponent(token)}`,
+        'Path=/',
+        `Expires=${expiresAt.toUTCString()}`,
+        'SameSite=Lax',
+        isSecure ? 'Secure' : ''
+      ].filter(Boolean).join('; ');
+      (reply as { header: (key: string, value: string) => unknown }).header(
+        'Set-Cookie',
+        cookie
+      );
+
+      const redirect = new URL(returnUrl);
+      if (responseBody.customer) {
+        redirect.searchParams.set('stripe_customer', String(responseBody.customer));
+      }
+      return reply.redirect(redirect.toString());
     }
   );
 

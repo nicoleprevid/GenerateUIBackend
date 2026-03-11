@@ -1,9 +1,10 @@
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyReply } from 'fastify';
 import { URL } from 'url';
 import * as oauth from 'oauth4webapi';
 import { v4 as uuid } from 'uuid';
 import { db } from '../db';
 import { signState, signToken, verifyState } from '../lib/jwt';
+import { getAuthCookieName } from '../lib/auth';
 import { createCheckoutSessionForUser } from '../billing/stripeCheckout';
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -426,22 +427,36 @@ async function hasActiveEntitlement(userId: string) {
   return status === 'active' || status === 'trialing';
 }
 
-function redirectWithToken(reply: { redirect: (url: string) => unknown }, redirectUri: string, userId: string) {
+function redirectWithToken(reply: FastifyReply, redirectUri: string, userId: string) {
   const token = signToken({ sub: userId });
-  const expiresAt = new Date(
-    Date.now() + 30 * 24 * 60 * 60 * 1000
-  ).toISOString();
-  const redirectUrl = new URL(redirectUri);
-  redirectUrl.searchParams.set('access_token', token);
-  redirectUrl.searchParams.set('expires_at', expiresAt);
-  return reply.redirect(redirectUrl.toString());
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const cookie = buildAuthCookie(token, expiresAt);
+  reply.header('Set-Cookie', cookie);
+  return reply.redirect(redirectUri);
+}
+
+function isSecureRequest() {
+  return BASE_URL.startsWith('https://');
+}
+
+function buildAuthCookie(token: string, expiresAt: Date) {
+  const parts = [
+    `${getAuthCookieName()}=${encodeURIComponent(token)}`,
+    'Path=/',
+    `Expires=${expiresAt.toUTCString()}`,
+    'SameSite=Lax'
+  ];
+  if (isSecureRequest()) {
+    parts.push('Secure');
+  }
+  return parts.join('; ');
 }
 
 async function completeLogin(
   provider: Provider,
   providerUserId: string,
   payload: LoginPayload,
-  reply: { redirect: (url: string) => unknown }
+  reply: FastifyReply
 ) {
   const userId = await findOrCreateUser(provider, providerUserId);
 
@@ -455,6 +470,10 @@ async function completeLogin(
     if (alreadyEntitled) {
       if (successUrl) {
         const redirectUrl = new URL(successUrl);
+        const token = signToken({ sub: userId });
+        const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        const cookie = buildAuthCookie(token, expiresAt);
+        reply.header('Set-Cookie', cookie);
         redirectUrl.searchParams.set('already_subscribed', '1');
         return reply.redirect(redirectUrl.toString());
       }
@@ -471,7 +490,7 @@ async function completeLogin(
     const session = await createCheckoutSessionForUser({
       userId,
       priceId,
-      successUrl,
+      successUrl: buildCheckoutSuccessUrl(successUrl),
       cancelUrl
     });
 
@@ -483,6 +502,13 @@ async function completeLogin(
   }
 
   return redirectWithToken(reply, payload.redirectUri, userId);
+}
+
+function buildCheckoutSuccessUrl(successUrl: string) {
+  const finishUrl = new URL(`${BASE_URL}/billing/checkout/finish`);
+  finishUrl.searchParams.set('session_id', '{CHECKOUT_SESSION_ID}');
+  finishUrl.searchParams.set('return_url', successUrl);
+  return finishUrl.toString();
 }
 
 export async function authRoutes(app: FastifyInstance) {
