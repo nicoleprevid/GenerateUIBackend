@@ -10,7 +10,13 @@ import { initDb } from './initDb';
 
 const app = Fastify({ logger: true, trustProxy: true });
 
-app.register(cors);
+app.register(cors, {
+  origin: [
+    'http://localhost:4200',
+    'https://generateuibackend-production.up.railway.app'
+  ],
+  credentials: true
+});
 app.register(eventsRoutes);
 app.register(authRoutes);
 app.register(telemetryRoutes);

@@ -440,11 +440,12 @@ function isSecureRequest() {
 }
 
 function buildAuthCookie(token: string, expiresAt: Date) {
+  const sameSite = isSecureRequest() ? 'None' : 'Lax';
   const parts = [
     `${getAuthCookieName()}=${encodeURIComponent(token)}`,
     'Path=/',
     `Expires=${expiresAt.toUTCString()}`,
-    'SameSite=Lax'
+    `SameSite=${sameSite}`
   ];
   if (isSecureRequest()) {
     parts.push('Secure');

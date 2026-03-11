@@ -697,7 +697,7 @@ export async function billingRoutes(app: FastifyInstance) {
         `${getAuthCookieName()}=${encodeURIComponent(token)}`,
         'Path=/',
         `Expires=${expiresAt.toUTCString()}`,
-        'SameSite=Lax',
+        `SameSite=${isSecure ? 'None' : 'Lax'}`,
         isSecure ? 'Secure' : ''
       ].filter(Boolean).join('; ');
       (reply as { header: (key: string, value: string) => unknown }).header(
