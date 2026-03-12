@@ -427,11 +427,26 @@ async function hasActiveEntitlement(userId: string) {
   return status === 'active' || status === 'trialing';
 }
 
+function isLocalRedirect(redirectUri: string) {
+  try {
+    const url = new URL(redirectUri);
+    return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
 function redirectWithToken(reply: FastifyReply, redirectUri: string, userId: string) {
   const token = signToken({ sub: userId });
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   const cookie = buildAuthCookie(token, expiresAt);
   reply.header('Set-Cookie', cookie);
+  if (isLocalRedirect(redirectUri)) {
+    const redirectUrl = new URL(redirectUri);
+    redirectUrl.searchParams.set('access_token', token);
+    redirectUrl.searchParams.set('expires_at', expiresAt.toISOString());
+    return reply.redirect(redirectUrl.toString());
+  }
   return reply.redirect(redirectUri);
 }
 
