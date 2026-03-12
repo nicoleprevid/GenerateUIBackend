@@ -541,7 +541,9 @@ export async function authRoutes(app: FastifyInstance) {
       cancel_url?: string;
     };
 
-    const startCheckout = query.start_checkout === '1' || LOGIN_AUTO_CHECKOUT;
+    const startCheckout =
+      query.start_checkout === '1' ||
+      (LOGIN_AUTO_CHECKOUT && !query.redirect_uri);
     if (!query.redirect_uri && !startCheckout) {
       return reply.status(400).send({ error: 'redirect_uri required' });
     }
@@ -568,7 +570,9 @@ export async function authRoutes(app: FastifyInstance) {
       cancel_url?: string;
     };
 
-    const startCheckout = query.start_checkout === '1' || LOGIN_AUTO_CHECKOUT;
+    const startCheckout =
+      query.start_checkout === '1' ||
+      (LOGIN_AUTO_CHECKOUT && !query.redirect_uri);
     if (!query.redirect_uri && !startCheckout) {
       return reply.status(400).send({ error: 'redirect_uri required' });
     }
